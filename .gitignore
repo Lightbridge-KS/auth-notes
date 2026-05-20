@@ -3,6 +3,7 @@
 /.venv/
 _book
 .DS_Store
+node_modules/
 
 # Large File
 data/stackoverflow2023/
