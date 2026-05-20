@@ -1,0 +1,112 @@
+---
+title: "Keycloak SSO between CKAN and a Hospital Exchange Zone"
+---
+
+## The problem Keycloak solves
+
+::: {.callout-note appearance="default" collapse="false"}
+**Q:** Let’s say there are two services: central CKAN app and local hospital exchange zone. 
+The exchange zone host radiology data that the user can request and download with secure session based transfer. 
+I’d like to know how KeyCloak can help with SSO, so that the user can logged in once in the CKAN and download data securely from exchange zone.
+:::
+
+Without an IdP, both CKAN and the Exchange Zone would each need their own login system, user database, and password reset flow. Users would log in twice. Worse, the Exchange Zone would have no reliable way to know whether a download request came from a real CKAN user with the right permissions.
+
+Keycloak becomes the **single source of truth for identity**. CKAN and the Exchange Zone stop caring about passwords — they only care about *signed tokens* that Keycloak issues.
+
+## The cast
+
+```
+┌──────────────┐
+│   Keycloak   │  ← Identity Provider (IdP)
+│              │     - stores users, passwords, groups
+│  realm: rama │     - issues signed tokens (JWT)
+└──────┬───────┘     - holds the central SSO session
+       │
+       │ trusts
+       ▼
+┌──────────────┐     ┌──────────────────┐
+│     CKAN     │     │  Exchange Zone   │
+│ (client A)   │     │   (client B)     │  ← OIDC clients
+│ data portal  │     │  radiology data  │     (a.k.a. Relying Parties)
+└──────────────┘     └──────────────────┘
+```
+
+Both apps are registered in Keycloak as **clients** within the same **realm**. Same realm = same user pool = SSO is possible.
+
+## Two protocols, two jobs
+
+OIDC and OAuth2 ride on the same request but answer different questions:
+
+- **OIDC** → "who is this user?" → produces an **ID Token** (a JWT with `sub`, `email`, `name`, hospital_id, etc.)
+- **OAuth2** → "what may this user do?" → produces an **Access Token** (a JWT with `roles`, `scopes`, `aud`)
+
+Keycloak hands both out in one redirect dance.
+
+## The SSO flow
+
+```
+ User                CKAN              Keycloak         Exchange Zone
+  │                   │                   │                   │
+  │  (1) open CKAN    │                   │                   │
+  ├──────────────────>│                   │                   │
+  │                   │ (2) not logged in │                   │
+  │<──────302─────────┤  redirect to KC   │                   │
+  │                                       │                   │
+  │  (3) login page  ──────────────────>  │                   │
+  │      enter creds                      │                   │
+  │  <──────────────────────── 302 + code │                   │
+  │                                       │                   │
+  │  (4) hand code   │                    │                   │
+  ├──────────────────>│                   │                   │
+  │                   │ (5) code→tokens   │                   │
+  │                   ├──────────────────>│                   │
+  │                   │<──ID+Access+Refr──┤                   │
+  │  (6) session cookie set               │                   │
+  │<──────────────────┤                   │                   │
+  │  ✓ logged in to CKAN                  │                   │
+  │                                       │                   │
+  │  ─────── user clicks "Download dataset" ──────────────>   │
+  │                                                           │
+  │  (7) not logged in here either                            │
+  │<───────── 302 to Keycloak ──────────────────────────────  │
+  │                                       │                   │
+  │  (8) browser still has KC cookie ───> │                   │
+  │      Keycloak sees active SSO session │                   │
+  │      ✨ NO LOGIN PROMPT ✨            │                   │
+  │  <───── 302 back with new code ─────  │                   │
+  │                                                           │
+  │  (9) hand code  ────────────────────────────────────────> │
+  │                                       │  exchange code    │
+  │                                       │<──────────────────┤
+  │                                       │──tokens──────────>│
+  │                                                           │
+  │ (10) Exchange Zone session cookie set                     │
+  │<──────────────────────────────────────────────────────────┤
+  │                                                           │
+  │ (11) GET /download/study123.zip ─────────────────────────>│
+  │ <════════ DICOM stream over TLS ═════════════════════════ │
+```
+
+The magic is at step **(8)**: the user's browser still holds the Keycloak SSO cookie from step 3. Keycloak recognises the existing session and issues a fresh code without showing a login form. From the user's perspective, the second login simply didn't happen.
+
+## Session-based transfer, explained
+
+"Secure session-based transfer" usually means this: OIDC is used **only at the front door**. Once Keycloak vouches for the user, the Exchange Zone sets its own server-side session cookie. The big DICOM download then rides on that cookie over HTTPS — no need to attach JWTs to every byte. The session is short-lived and tied to the Keycloak token's expiry.
+
+A common refinement: the Exchange Zone refreshes the session silently using the **refresh token**, and revokes it the moment Keycloak says the user logged out (via back-channel logout).
+
+## Where authorization fits
+
+Authentication only tells the Exchange Zone *who* the user is. Authorization decides *what* they can download. Two clean patterns:
+
+```
+Keycloak roles/groups          Exchange Zone enforcement
+─────────────────────         ──────────────────────────
+  radiologist        ──┐
+  researcher         ──┼──>   check token.roles
+  data_steward       ──┘      against dataset.acl
+  hospital:ramathibodi ─────> filter by hospital_id claim
+```
+
+Keycloak embeds these claims into the access token. The Exchange Zone validates the token's signature against Keycloak's public key (no network call needed per request) and reads the claims to gate the download.

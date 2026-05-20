@@ -9,6 +9,10 @@ book:
   site-url: https://auth-notes-lightbridge.netlify.app
   chapters:
     - index.qmd
+    - part: Keycloak
+      chapters: 
+        - text: "SSO - CKAN-Hospital"
+          href: contents/keycloak/keycloak_sso_ckan_hospital.qmd
 
 format:
   html:
