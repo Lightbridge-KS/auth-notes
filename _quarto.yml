@@ -1,0 +1,22 @@
+project:
+  type: book
+
+book:
+  title: "Auth Notes"
+  author: "Kittipos Sirivongrungson"
+  date: today
+  repo-url: https://github.com/Lightbridge-KS/auth-notes
+  site-url: https://auth-notes-lightbridge.netlify.app
+  chapters:
+    - index.qmd
+
+format:
+  html:
+    theme:
+      light:
+      - cosmo
+      dark:
+      - darkly
+    toc-depth: 4
+
+freeze: auto
